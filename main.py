@@ -16,8 +16,9 @@ from tokenizer import Tokenizer, reconstruct_from_patches
 from transformer import Transformer
 
 IMG_SIZE, PATCH, FRAMES_T, BURN_IN = 64, 8, 20, 10
-BATCH, BUFFER_SZ, UPDATES, EVAL_EVERY = 32, 500, 10_000, 100
-LR, CODEBOOK = 3e-4, 1_024
+BATCH, BUFFER_SZ, UPDATES, EVAL_EVERY = 32, 1_000, 10_000, 100
+LR, CODEBOOK = 3e-4, 4096
+THRESHOLD = 0.5
 
 
 def _preprocess(rgb: jnp.ndarray, size: int) -> jnp.ndarray:
@@ -78,28 +79,28 @@ def _generate(
     return reconstruct_from_patches(decoded, PATCH, C)
 
 
-def main() -> None:
-    wandb.init(project="embrl")
-    rng = jax.random.PRNGKey(0)
-    rng, dk = jax.random.split(rng)
-    frames = _collect_frames(BUFFER_SZ, IMG_SIZE, dk)
-    rng, ktok, ktr = jax.random.split(rng, 3)
-    tok = Tokenizer(dim=PATCH * PATCH * 3, thr=0.1, max_codes=CODEBOOK, key=ktok)
-    tr = Transformer(
-        dim=256,
-        depth=6,
-        block=(IMG_SIZE // PATCH) ** 2,
-        heads=8,
-        hdim=32,
-        ff=4.0,
-        drop_e=0.1,
-        drop_a=0.1,
-        drop_f=0.1,
-        vocab=CODEBOOK,
-        k=ktr,
-    )
+def train_tokenizer(frames: jnp.ndarray, tokenizer: Tokenizer) -> Tokenizer:
+    print(f"Training tokenizer on {frames.shape[0]} frames...")
+    for i in range(frames.shape[0]):
+        frame = frames[i : i + 1]
+        frame_with_time = frame[:, :, None, :, :]
+        _, tokenizer = tokenizer.forward_tokenize(frame_with_time, PATCH, train=True)
+        if i % 100 == 0:
+            active_codes = int(tokenizer.active.sum())
+            print(
+                f"  Frame {i}/{frames.shape[0]}, Active codes: {active_codes}/{CODEBOOK}"
+            )
+
+    active_codes = int(tokenizer.active.sum())
+    print(f"Tokenizer training complete. Final active codes: {active_codes}/{CODEBOOK}")
+    return tokenizer
+
+
+def train_transformer(
+    frames: jnp.ndarray, tokenizer: Tokenizer, transformer: Transformer, key: jax.Array
+) -> None:
     opt = optax.adamw(LR)
-    opt_state = opt.init(eqx.filter(tr, eqx.is_array))
+    opt_state = opt.init(eqx.filter(transformer, eqx.is_array))
 
     @eqx.filter_value_and_grad
     def _loss(model, x, y, key):
@@ -118,18 +119,23 @@ def main() -> None:
         model = eqx.apply_updates(model, updates)
         return loss, model, o_state
 
+    rng = key
     for step in range(UPDATES):
         rng, bk, lk = jax.random.split(rng, 3)
         batch = _sample(frames, BATCH, FRAMES_T, bk)
-        codes, tok = tok.forward_tokenize(batch, PATCH, train=True)
+        codes, _ = tokenizer.forward_tokenize(batch, PATCH, train=False)
         inp = codes[:, :-1].reshape(BATCH, -1)
         tgt = codes[:, 1:].reshape(BATCH, -1)
-        loss, tr, opt_state = _step(tr, opt_state, inp, tgt, lk)
+        loss, transformer, opt_state = _step(transformer, opt_state, inp, tgt, lk)
+
         if step % 10 == 0:
             wandb.log({"loss": float(loss)}, step=step)
+
         if step % EVAL_EVERY == 0:
             rng, gk = jax.random.split(rng)
-            rollout = _generate(tok, tr, batch[:, :, :BURN_IN], FRAMES_T, 1.0, gk)
+            rollout = _generate(
+                tokenizer, transformer, batch[:, :, :BURN_IN], FRAMES_T, 1.0, gk
+            )
             gt = np.array(batch[0].transpose(1, 0, 2, 3))
             pr = np.array(rollout[0].transpose(1, 0, 2, 3))
 
@@ -145,6 +151,36 @@ def main() -> None:
             plt.tight_layout()
             wandb.log({"rollout": wandb.Image(fig)}, step=step)
             plt.close(fig)
+
+
+def main() -> None:
+    wandb.init(project="embrl")
+    rng = jax.random.PRNGKey(0)
+    rng, dk, ktok, ktr, train_key = jax.random.split(rng, 5)
+
+    frames = _collect_frames(BUFFER_SZ, IMG_SIZE, dk)
+
+    tokenizer = Tokenizer(
+        dim=PATCH * PATCH * 3, thr=THRESHOLD, max_codes=CODEBOOK, key=ktok
+    )
+
+    tokenizer = train_tokenizer(frames, tokenizer)
+
+    transformer = Transformer(
+        dim=256,
+        depth=6,
+        block=(IMG_SIZE // PATCH) ** 2,
+        heads=8,
+        hdim=32,
+        ff=4.0,
+        drop_e=0.1,
+        drop_a=0.1,
+        drop_f=0.1,
+        vocab=CODEBOOK,
+        k=ktr,
+    )
+
+    train_transformer(frames, tokenizer, transformer, train_key)
 
 
 if __name__ == "__main__":
