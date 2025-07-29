@@ -15,8 +15,8 @@ from craftax.craftax_env import make_craftax_env_from_name
 from tokenizer import Tokenizer, reconstruct_from_patches
 from transformer import Transformer
 
-IMG_SIZE, PATCH, FRAMES_T, BURN_IN = 64, 8, 6, 2
-BATCH, BUFFER_SZ, UPDATES, EVAL_EVERY = 16, 5_000, 1_000, 100
+IMG_SIZE, PATCH, FRAMES_T, BURN_IN = 64, 8, 20, 10
+BATCH, BUFFER_SZ, UPDATES, EVAL_EVERY = 16, 10_000, 10_000, 100
 LR, CODEBOOK = 3e-4, 1_024
 
 
@@ -132,14 +132,16 @@ def main() -> None:
             rollout = _generate(tok, tr, batch[:, :, :BURN_IN], FRAMES_T, 1.0, gk)
             gt = np.array(batch[0].transpose(1, 0, 2, 3))
             pr = np.array(rollout[0].transpose(1, 0, 2, 3))
-            fig, ax = plt.subplots(2, FRAMES_T, figsize=(FRAMES_T * 1.4, 3))
-            for t in range(FRAMES_T):
+
+            T_show = FRAMES_T - BURN_IN
+            fig, ax = plt.subplots(2, T_show, figsize=(T_show * 1.4, 3))
+            for i, t in enumerate(range(BURN_IN, FRAMES_T)):
                 gt_img = gt[t].transpose(1, 2, 0)
                 pr_img = pr[t].transpose(1, 2, 0)
-                ax[0, t].imshow(gt_img.clip(0, 1))
-                ax[0, t].axis("off")
-                ax[1, t].imshow(pr_img.clip(0, 1))
-                ax[1, t].axis("off")
+                ax[0, i].imshow(gt_img.clip(0, 1))
+                ax[0, i].axis("off")
+                ax[1, i].imshow(pr_img.clip(0, 1))
+                ax[1, i].axis("off")
             plt.tight_layout()
             wandb.log({"rollout": wandb.Image(fig)}, step=step)
             plt.close(fig)
