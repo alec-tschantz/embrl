@@ -16,7 +16,7 @@ from tokenizer import Tokenizer, reconstruct_from_patches
 from transformer import Transformer
 
 IMG_SIZE, PATCH, FRAMES_T, BURN_IN = 64, 8, 20, 10
-BATCH, BUFFER_SZ, UPDATES, EVAL_EVERY = 16, 10_000, 10_000, 100
+BATCH, BUFFER_SZ, UPDATES, EVAL_EVERY = 32, 500, 10_000, 100
 LR, CODEBOOK = 3e-4, 1_024
 
 
@@ -84,7 +84,7 @@ def main() -> None:
     rng, dk = jax.random.split(rng)
     frames = _collect_frames(BUFFER_SZ, IMG_SIZE, dk)
     rng, ktok, ktr = jax.random.split(rng, 3)
-    tok = Tokenizer(dim=PATCH * PATCH * 3, thr=0.5, max_codes=CODEBOOK, key=ktok)
+    tok = Tokenizer(dim=PATCH * PATCH * 3, thr=0.1, max_codes=CODEBOOK, key=ktok)
     tr = Transformer(
         dim=256,
         depth=6,
