@@ -1,0 +1,7 @@
+numpy
+wandb
+jax[cuda12]
+optax
+equinox
+matplotlib
+craftax

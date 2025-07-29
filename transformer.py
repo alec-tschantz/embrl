@@ -156,6 +156,5 @@ class Transformer(eqx.Module):
         for blk, k in zip(self.blocks, keys):
             x = blk(x, mask, key=k)
 
-        # vmap norm + head
         x = jax.vmap(self.norm)(x)
         return jax.vmap(self.head)(x)

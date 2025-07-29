@@ -11,7 +11,7 @@ def extract_patches(
     B, C, T, H, W = x.shape
     Hp, Wp, D = H // p, W // p, p * p * C
     x = x.reshape(B, C, T, Hp, p, Wp, p)
-    x = x.transpose(0, 2, 3, 5, 4, 6, 1)  
+    x = x.transpose(0, 2, 3, 5, 4, 6, 1)
     return x.reshape(B, T, Hp, Wp, D)
 
 
@@ -21,7 +21,7 @@ def reconstruct_from_patches(
     """Inverse of `extract_patches`."""
     B, T, Hp, Wp, _ = p.shape
     p = p.reshape(B, T, Hp, Wp, psz, psz, c)
-    p = p.transpose(0, 6, 1, 2, 4, 3, 5) 
+    p = p.transpose(0, 6, 1, 2, 4, 3, 5)
     return p.reshape(B, c, T, Hp * psz, Wp * psz)
 
 
@@ -41,8 +41,8 @@ class Tokenizer(eqx.Module):
 
     # ── internal helpers ───────────────────────────
     def _d2(self, x):
-        x2 = (x**2).sum(-1, keepdims=True) 
-        c2 = (self.codes**2).sum(-1)  
+        x2 = (x**2).sum(-1, keepdims=True)
+        c2 = (self.codes**2).sum(-1)
         d = x2 + c2 - 2 * jnp.einsum("bsd,nd->bsn", x, self.codes)
         return jnp.where(self.active[None, None, :], d, jnp.inf)
 

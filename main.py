@@ -9,14 +9,15 @@ import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
 import optax
+import wandb
 from craftax.craftax_env import make_craftax_env_from_name
 
 from tokenizer import Tokenizer, reconstruct_from_patches
 from transformer import Transformer
 
 IMG_SIZE, PATCH, FRAMES_T, BURN_IN = 64, 8, 6, 2
-BATCH, BUFFER_SZ, UPDATES, EVAL_EVERY = 16, 1000, 1000, 10
-LR, CODEBOOK = 3e-4, 1024
+BATCH, BUFFER_SZ, UPDATES, EVAL_EVERY = 16, 5_000, 1_000, 100
+LR, CODEBOOK = 3e-4, 1_024
 
 
 def _preprocess(rgb: jnp.ndarray, size: int) -> jnp.ndarray:
@@ -78,6 +79,7 @@ def _generate(
 
 
 def main() -> None:
+    wandb.init(project="embrl")
     rng = jax.random.PRNGKey(0)
     rng, dk = jax.random.split(rng)
     frames = _collect_frames(BUFFER_SZ, IMG_SIZE, dk)
@@ -124,7 +126,7 @@ def main() -> None:
         tgt = codes[:, 1:].reshape(BATCH, -1)
         loss, tr, opt_state = _step(tr, opt_state, inp, tgt, lk)
         if step % 10 == 0:
-            print(f"{step:04d} | loss={float(loss):.4f}")
+            wandb.log({"loss": float(loss)}, step=step)
         if step % EVAL_EVERY == 0:
             rng, gk = jax.random.split(rng)
             rollout = _generate(tok, tr, batch[:, :, :BURN_IN], FRAMES_T, 1.0, gk)
@@ -139,7 +141,8 @@ def main() -> None:
                 ax[1, t].imshow(pr_img.clip(0, 1))
                 ax[1, t].axis("off")
             plt.tight_layout()
-            plt.show()
+            wandb.log({"rollout": wandb.Image(fig)}, step=step)
+            plt.close(fig)
 
 
 if __name__ == "__main__":
