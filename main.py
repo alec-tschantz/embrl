@@ -1,13 +1,11 @@
-# main.py
-import warnings
-
-warnings.filterwarnings("ignore")
-
 from dataclasses import dataclass
 from typing import Tuple, Any, Optional
 
 import equinox as eqx
-import jax, jax.numpy as jnp, jax.image, jax.lax as lax
+import jax
+import jax.numpy as jnp
+import jax.image
+import jax.lax as lax
 import numpy as np
 import optax
 import wandb
@@ -26,19 +24,25 @@ class Args:
     burn_in: int = 5
     batch: int = 8
     max_buffer: int = 50_000
+    test_frac: float = 0.2
+
     updates: int = 50_000
     eval_every: int = 500
     lr: float = 3e-4
+    grad_clip: float = 1.0
+
     codebook: int = 256
     threshold: float = 0.75
     embed_dim: int = 256
     layers: int = 6
     heads: int = 8
-    grad_clip: float = 1.0
-    test_frac: float = 0.2
+
+    eval_batches: int = 10
+    rollout_len: int = 30
+    gif_fps: int = 4
+
     use_wandb: bool = True
     project: str = "itwm"
-    gif_fps: int = 4
 
 
 def _preprocess(rgb: jnp.ndarray, size: int) -> jnp.ndarray:
@@ -102,9 +106,10 @@ def _train_step(
     key: jax.Array,
 ):
     loss, grads = eqx.filter_value_and_grad(loss_fn)(model, x, y, actions, key)
+    grad_norm = optax.global_norm(grads)
     updates, opt_state = opt.update(grads, opt_state, eqx.filter(model, eqx.is_array))
     model = eqx.apply_updates(model, updates)
-    return loss, model, opt_state
+    return loss, grad_norm, model, opt_state
 
 
 def _log_rollout(
@@ -127,6 +132,47 @@ def _log_rollout(
     video = np.stack(frames).transpose(0, 3, 2, 1)
     if run is not None:
         run.log({"rollout": wandb.Video(video, fps=fps, format="gif")}, step=step)
+
+
+def evaluate_and_log(
+    model: Transformer,
+    tokenizer: Tokenizer,
+    frames: jnp.ndarray,
+    actions: jnp.ndarray,
+    args: Args,
+    run: Optional[Any],
+    step: int,
+    rng: jax.Array,
+):
+    rngs = jax.random.split(rng, args.eval_batches + 2)
+    losses = []
+    for i in range(args.eval_batches):
+        k = rngs[i]
+        te_data, te_acts = _sample(frames, actions, args.batch, args.seq_len, k)
+        te_codes = tokenizer(te_data, args.patch)
+        te_inp = te_codes[:, :-1].reshape(args.batch, -1)
+        te_tgt = te_codes[:, 1:].reshape(args.batch, -1)
+        te_acts = te_acts[:, :-1]
+        losses.append(loss_fn(model, te_inp, te_tgt, te_acts, k))
+
+    test_loss = jnp.stack(losses).mean()
+
+    roll_key = rngs[-2]
+    roll_data, roll_acts = _sample(
+        frames, actions, args.batch, args.rollout_len, roll_key
+    )
+    obs_burn = roll_data[:, :, : argss.burn_in]
+    init_seq = tokenizer(obs_burn, args.patch)
+    preds = jax.vmap(model.generate)(init_seq, roll_acts)
+    pred_pix = tokenizer.decode(preds, args.patch, 3)
+
+    _log_rollout(roll_data, pred_pix, step, run, args.gif_fps)
+
+    if run is not None:
+        run.log(
+            {"test_loss": float(test_loss)},
+            step=step,
+        )
 
 
 def main(args: Args):
@@ -162,7 +208,7 @@ def main(args: Args):
     model = Transformer(
         dim=args.embed_dim,
         depth=args.layers,
-        block=(args.img_size // args.patch) ** 2,  # P = tokens/frame
+        block=(args.img_size // args.patch) ** 2,
         heads=args.heads,
         hdim=args.embed_dim // args.heads,
         ff=4.0,
@@ -173,11 +219,12 @@ def main(args: Args):
         n_actions=n_actions,
         k=tr_k,
     )
+
     opt = optax.chain(optax.clip_by_global_norm(args.grad_clip), optax.adamw(args.lr))
     opt_state = opt.init(eqx.filter(model, eqx.is_array))
 
     for step in range(args.updates):
-        loop_k, trk, evk, lk = jax.random.split(loop_k, 4)
+        loop_k, trk, lk, evk = jax.random.split(loop_k, 4)
 
         tr_data, tr_acts = _sample(tr_frames, tr_actions, args.batch, args.seq_len, trk)
         tr_codes = tokenizer(tr_data, args.patch)
@@ -185,30 +232,32 @@ def main(args: Args):
         tr_tgt = tr_codes[:, 1:].reshape(args.batch, -1)
         tr_acts = tr_acts[:, :-1]
 
-        train_loss, model, opt_state = _train_step(
+        train_loss, grad_norm, model, opt_state = _train_step(
             model, opt_state, tr_inp, tr_tgt, tr_acts, opt, lk
         )
+
         if run and step % 10 == 0:
-            run.log({"train_loss": float(train_loss)}, step=step)
+            weight_norm = optax.global_norm(eqx.filter(model, eqx.is_array))
+            run.log(
+                {
+                    "train_loss": float(train_loss),
+                    "grad_norm": float(grad_norm),
+                    "weight_norm": float(weight_norm),
+                },
+                step=step,
+            )
 
         if step % args.eval_every == 0:
-            te_data, te_acts = _sample(
-                te_frames, te_actions, args.batch, args.seq_len, evk
+            evaluate_and_log(
+                model=model,
+                tokenizer=tokenizer,
+                frames=te_frames,
+                actions=te_actions,
+                args=args,
+                run=run,
+                step=step,
+                rng=evk,
             )
-            te_codes = tokenizer(te_data, args.patch)
-            te_inp = te_codes[:, :-1].reshape(args.batch, -1)
-            te_tgt = te_codes[:, 1:].reshape(args.batch, -1)
-            te_acts = te_acts[:, :-1]
-
-            test_loss = loss_fn(model, te_inp, te_tgt, te_acts, evk)
-            if run:
-                run.log({"test_loss": float(test_loss)}, step=step)
-
-            obs_burn = te_data[:, :, : args.burn_in]
-            init_seq = tokenizer(obs_burn, args.patch)
-            preds = jax.vmap(model.generate)(init_seq, te_acts)
-            pred_pix = tokenizer.decode(preds, args.patch, 3)
-            _log_rollout(te_data, pred_pix, step, run, args.gif_fps)
 
     if run:
         run.finish()
