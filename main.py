@@ -32,7 +32,7 @@ class Args:
     grad_clip: float = 0.5
     weight_decay: float = 1e-3
 
-    codebook: int = 256
+    codebook: int = 512
     threshold: float = 0.75
     embed_dim: int = 256
     layers: int = 4
