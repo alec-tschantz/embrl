@@ -25,7 +25,7 @@ class Args:
     seq_len: int = 20
     burn_in: int = 5
     batch: int = 8
-    max_buffer: int = 15_000
+    max_buffer: int = 50_000
     updates: int = 50_000
     eval_every: int = 500
     lr: float = 3e-4
