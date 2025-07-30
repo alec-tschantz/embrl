@@ -23,18 +23,19 @@ class Args:
     seq_len: int = 20
     burn_in: int = 5
     batch: int = 8
-    max_buffer: int = 50_000
+    max_buffer: int = 100_000
     test_frac: float = 0.2
 
     updates: int = 50_000
     eval_every: int = 500
     lr: float = 3e-4
-    grad_clip: float = 1.0
+    grad_clip: float = 0.5
+    weight_decay: float = 1e-3
 
     codebook: int = 256
     threshold: float = 0.75
     embed_dim: int = 256
-    layers: int = 6
+    layers: int = 4
     heads: int = 8
 
     eval_batches: int = 10
@@ -113,22 +114,16 @@ def _train_step(
 
 
 def _log_rollout(
-    gt: jnp.ndarray,
-    pr: jnp.ndarray,
-    step: int,
-    run: Optional[Any],
-    fps: int,
+    gt: jnp.ndarray, pr: jnp.ndarray, step: int, run: Optional[Any], fps: int
 ):
     g = np.array(gt[0].transpose(1, 0, 2, 3))
     p = np.array(pr[0].transpose(1, 0, 2, 3))
-
     frames = []
     for t in range(p.shape[0]):
         top = g[t].transpose(1, 2, 0)
         bottom = p[t].transpose(1, 2, 0)
         frm = np.concatenate([top, bottom], axis=0)
         frames.append((frm.clip(0, 1) * 255).astype(np.uint8))
-
     video = np.stack(frames).transpose(0, 3, 2, 1)
     if run is not None:
         run.log({"rollout": wandb.Video(video, fps=fps, format="gif")}, step=step)
@@ -154,25 +149,18 @@ def evaluate_and_log(
         te_tgt = te_codes[:, 1:].reshape(args.batch, -1)
         te_acts = te_acts[:, :-1]
         losses.append(loss_fn(model, te_inp, te_tgt, te_acts, k))
-
     test_loss = jnp.stack(losses).mean()
-
     roll_key = rngs[-2]
     roll_data, roll_acts = _sample(
         frames, actions, args.batch, args.rollout_len, roll_key
     )
-    obs_burn = roll_data[:, :, : argss.burn_in]
+    obs_burn = roll_data[:, :, : args.burn_in]
     init_seq = tokenizer(obs_burn, args.patch)
     preds = jax.vmap(model.generate)(init_seq, roll_acts)
     pred_pix = tokenizer.decode(preds, args.patch, 3)
-
     _log_rollout(roll_data, pred_pix, step, run, args.gif_fps)
-
     if run is not None:
-        run.log(
-            {"test_loss": float(test_loss)},
-            step=step,
-        )
+        run.log({"test_loss": float(test_loss)}, step=step)
 
 
 def main(args: Args):
@@ -181,19 +169,15 @@ def main(args: Args):
         if args.use_wandb
         else None
     )
-
     rng = jax.random.PRNGKey(args.seed)
     rng, data_k, tok_k, tr_k, loop_k = jax.random.split(rng, 5)
-
     env = make_craftax_env_from_name("Craftax-Classic-Pixels-v1", auto_reset=True)
     frames, actions = _collect_frames_and_actions(
         env, args.max_buffer, args.img_size, data_k
     )
-
     split = int(frames.shape[0] * (1.0 - args.test_frac))
     tr_frames, te_frames = frames[:split], frames[split:]
     tr_actions, te_actions = actions[:split], actions[split:]
-
     tokenizer = Tokenizer(
         dim=args.patch * args.patch * 3,
         thr=args.threshold,
@@ -203,7 +187,6 @@ def main(args: Args):
     for i in range(frames.shape[0]):
         tokenizer = tokenizer.update(frames[i : i + 1, :, None, :, :], args.patch)
     print(f"tokenizer ready {int(tokenizer.active.sum())}/{args.codebook}")
-
     n_actions = env.action_space(env.default_params).n
     model = Transformer(
         dim=args.embed_dim,
@@ -212,30 +195,29 @@ def main(args: Args):
         heads=args.heads,
         hdim=args.embed_dim // args.heads,
         ff=4.0,
-        drop_e=0.1,
-        drop_a=0.1,
-        drop_f=0.1,
+        drop_e=0.2,
+        drop_a=0.2,
+        drop_f=0.2,
         vocab=args.codebook,
         n_actions=n_actions,
         k=tr_k,
     )
-
-    opt = optax.chain(optax.clip_by_global_norm(args.grad_clip), optax.adamw(args.lr))
+    sched = optax.cosine_decay_schedule(init_value=args.lr, decay_steps=args.updates)
+    opt = optax.chain(
+        optax.clip_by_global_norm(args.grad_clip),
+        optax.adamw(learning_rate=sched, weight_decay=args.weight_decay),
+    )
     opt_state = opt.init(eqx.filter(model, eqx.is_array))
-
     for step in range(args.updates):
         loop_k, trk, lk, evk = jax.random.split(loop_k, 4)
-
         tr_data, tr_acts = _sample(tr_frames, tr_actions, args.batch, args.seq_len, trk)
         tr_codes = tokenizer(tr_data, args.patch)
         tr_inp = tr_codes[:, :-1].reshape(args.batch, -1)
         tr_tgt = tr_codes[:, 1:].reshape(args.batch, -1)
         tr_acts = tr_acts[:, :-1]
-
         train_loss, grad_norm, model, opt_state = _train_step(
             model, opt_state, tr_inp, tr_tgt, tr_acts, opt, lk
         )
-
         if run and step % 10 == 0:
             weight_norm = optax.global_norm(eqx.filter(model, eqx.is_array))
             run.log(
@@ -246,7 +228,6 @@ def main(args: Args):
                 },
                 step=step,
             )
-
         if step % args.eval_every == 0:
             evaluate_and_log(
                 model=model,
@@ -258,7 +239,6 @@ def main(args: Args):
                 step=step,
                 rng=evk,
             )
-
     if run:
         run.finish()
 
