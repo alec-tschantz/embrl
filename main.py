@@ -28,18 +28,18 @@ class Args:
     patch: int = 7
     seq_len: int = 20
     burn_in: int = 5
-    batch: int = 8
-    max_buffer: int = 5_000
+    batch: int = 32
+    max_buffer: int = 10_000
     updates: int = 10_000
-    eval_every: int = 100
-    lr: float = 1e-3
+    eval_every: int = 200
+    lr: float = 3e-4
     codebook: int = 256
     threshold: float = 0.75
-    embed_dim: int = 128
-    layers: int = 3
+    embed_dim: int = 256
+    layers: int = 6
     heads: int = 8
-    grad_clip: float = 0.5
-    use_wandb: bool = False
+    grad_clip: float = 1.0
+    use_wandb: bool = True
     project: str = "itwm"
 
 
@@ -194,7 +194,7 @@ def train_transformer(
     run: Optional[Any],
     key: jax.Array,
 ) -> None:
-    opt = optax.chain(optax.clip_by_global_norm(grad_clip), optax.adam(lr))
+    opt = optax.chain(optax.clip_by_global_norm(grad_clip), optax.adamw(lr))
     opt_state = opt.init(eqx.filter(transformer, eqx.is_array))
     rng = key
     for step in range(updates):
