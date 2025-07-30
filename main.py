@@ -22,10 +22,10 @@ class Args:
     seed: int = 0
     img_size: int = 63
     patch: int = 7
-    seq_len: int = 30
+    seq_len: int = 20
     burn_in: int = 5
-    batch: int = 16
-    max_buffer: int = 50_000
+    batch: int = 8
+    max_buffer: int = 15_000
     updates: int = 50_000
     eval_every: int = 500
     lr: float = 3e-4
