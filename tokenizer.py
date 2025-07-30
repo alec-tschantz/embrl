@@ -1,8 +1,8 @@
 import jax
-import jax.lax as lax
 import jax.numpy as jnp
+import jax.lax as lax
 import equinox as eqx
-from jaxtyping import Array, Float, Int32
+from jaxtyping import Array, Float, Int32, Bool
 
 
 def extract_patches(
@@ -16,91 +16,76 @@ def extract_patches(
 
 
 def reconstruct_from_patches(
-    p: Float[Array, "B T Hp Wp D"], psz: int, c: int
+    patches: Float[Array, "B T Hp Wp D"], p: int, c: int
 ) -> Float[Array, "B C T H W"]:
-    """Inverse of `extract_patches`."""
-    B, T, Hp, Wp, _ = p.shape
-    p = p.reshape(B, T, Hp, Wp, psz, psz, c)
-    p = p.transpose(0, 6, 1, 2, 4, 3, 5)
-    return p.reshape(B, c, T, Hp * psz, Wp * psz)
+    B, T, Hp, Wp, _ = patches.shape
+    patches = patches.reshape(B, T, Hp, Wp, p, p, c)
+    patches = patches.transpose(0, 6, 1, 2, 4, 3, 5)
+    return patches.reshape(B, c, T, Hp * p, Wp * p)
 
 
 class Tokenizer(eqx.Module):
-
     codes: Float[Array, "N D"]
-    active: Array
+    active: Bool[Array, "N"]
     max: int
     dim: int
     thr: float
     noc: int = -1
 
-    def __init__(self, dim: int, thr: float, max_codes: int, key):
-        self.dim, self.thr, self.max = dim, thr, max_codes
-        self.codes = jnp.zeros((max_codes, dim))
+    def __init__(self, dim: int, thr: float = 0.75, max_codes: int = 4096, *, key):
+        self.dim = dim
+        self.thr = thr
+        self.max = max_codes
+        self.codes = jnp.zeros((max_codes, dim), dtype=jnp.float32)
         self.active = jnp.zeros(max_codes, dtype=bool)
 
-    # ── internal helpers ───────────────────────────
-    def _d2(self, x):
-        x2 = (x**2).sum(-1, keepdims=True)
-        c2 = (self.codes**2).sum(-1)
-        d = x2 + c2 - 2 * jnp.einsum("bsd,nd->bsn", x, self.codes)
-        return jnp.where(self.active[None, None, :], d, jnp.inf)
+    def _sqdists(self, x: Float[Array, "... D"]) -> Float[Array, "... N"]:
+        x2 = jnp.sum(x**2, axis=-1, keepdims=True)
+        c2 = jnp.sum(self.codes**2, axis=-1)
+        d = x2 + c2 - 2 * jnp.einsum("...d,nd->...n", x, self.codes)
+        return jnp.where(self.active, d, jnp.inf)
 
-    def _grow(self, x, mask):
-        flat, mflat = x.reshape(-1, self.dim), mask.reshape(-1)
+    def __call__(
+        self, imgs: Float[Array, "B C T H W"], patch_size: int
+    ) -> Int32[Array, "B T Hp Wp"]:
+        patches = extract_patches(imgs, patch_size)
+        B, T, Hp, Wp, _ = patches.shape
+        flat = patches.reshape(-1, self.dim)
+        d = self._sqdists(flat)
+        best = d.argmin(-1)
+        keep = jnp.take_along_axis(d, best[..., None], -1)[..., 0] <= self.thr
+        idx = jnp.where(keep, best, self.noc)
+        return idx.reshape(B, T, Hp, Wp)
 
-        def body(carry, inp):
-            codes, act, ptr = carry
-            vec, flag = inp
+    @eqx.filter_jit
+    def update(self, imgs: Float[Array, "B C T H W"], patch_size: int) -> "Tokenizer":
+        patches = extract_patches(imgs, patch_size)
+        flat = patches.reshape(-1, self.dim)
 
-            def add(carry_inner):
-                c, a, p = carry_inner
-                c = c.at[p].set(vec)
-                a = a.at[p].set(True)
-                return c, a, p + 1
+        def body(carry, vec):
+            codes, active, ptr = carry
+            d = jnp.sum(vec**2) + jnp.sum(codes**2, axis=1) - 2 * jnp.dot(codes, vec)
+            d = jnp.where(active, d, jnp.inf)
+            add = (d.min() > self.thr) & (ptr < self.max)
+            codes = lax.cond(add, lambda c: c.at[ptr].set(vec), lambda c: c, codes)
+            active = lax.cond(add, lambda a: a.at[ptr].set(True), lambda a: a, active)
+            ptr = ptr + lax.convert_element_type(add, jnp.int32)
+            return (codes, active, ptr), None
 
-            return lax.cond(flag & (ptr < self.max), add, lambda z: z, carry), None
+        ptr0 = jnp.sum(self.active, dtype=jnp.int32)
+        (codes, active, _), _ = lax.scan(body, (self.codes, self.active, ptr0), flat)
+        return eqx.tree_at(lambda t: (t.codes, t.active), self, (codes, active))
 
-        start_ptr = self.active.sum()
-        (codes, act, _), _ = lax.scan(
-            body, (self.codes, self.active, start_ptr), (flat, mflat)
-        )
-        return codes, act
-
-    def tokenize(self, x, *, train: bool = True):
-        """Vector‑quantise `x`: (B,S,D) → (B,S) indices."""
-        if not bool(self.active.any()):
-            c, a = self._grow(x, jnp.ones(x.shape[:2], dtype=bool))
-            self = eqx.tree_at(lambda t: (t.codes, t.active), self, (c, a))
-
-        d = self._d2(x)
-        idx = d.argmin(-1)
-        ok = jnp.take_along_axis(d, idx[..., None], -1)[..., 0] <= self.thr
-
-        c, a = lax.cond(
-            (~ok).any() & train,
-            lambda: self._grow(x, ~ok),
-            lambda: (self.codes, self.active),
-        )
-        tok = eqx.tree_at(lambda t: (t.codes, t.active), self, (c, a))
-        return (idx if train else jnp.where(ok, idx, self.noc)), tok
-
-    def forward_tokenize(
+    def decode(
         self,
-        imgs: Float[Array, "B C T H W"],
+        idx: Int32[Array, "B T Hp Wp"],
         patch_size: int,
-        *,
-        train: bool = True,
-    ):
-        """(B,C,T,H,W) → indices (B,T,Hp,Wp)."""
-        patches = extract_patches(imgs, patch_size)  # B,T,Hp,Wp,D
-        B, T, Hp, Wp, D = patches.shape
-        flat = patches.reshape(B, T * Hp * Wp, D)  # B,S,D
-        idx, new = self.tokenize(flat, train=train)
-        return idx.reshape(B, T, Hp, Wp), new
-
-    def decode(self, idx: Int32[Array, "B S"]) -> Float[Array, "B S D"]:
-        """Indices → flattened patch vectors (zeros for unknown codes)."""
-        valid = idx != self.noc
-        idx = jnp.clip(idx, 0, self.max - 1)
-        return jnp.where(valid[..., None], self.codes[idx], 0.0)
+        channels: int,
+    ) -> Float[Array, "B C T H W"]:
+        B, T, Hp, Wp = idx.shape
+        flat = idx.reshape(-1)
+        valid = flat != self.noc
+        flat = jnp.clip(flat, 0, self.max - 1)
+        vecs = jnp.where(valid[:, None], self.codes[flat], 0.0)
+        patches = vecs.reshape(B, T, Hp, Wp, self.dim)
+        return reconstruct_from_patches(patches, patch_size, channels)
