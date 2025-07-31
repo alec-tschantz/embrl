@@ -379,11 +379,10 @@ def main(args: Args):
                 if run:
                     run.log({"test_loss": float(test_loss)}, step=step)
 
-                    if step % (args.eval_every * 2) == 0:
-                        roll_key = jax.random.fold_in(eval_key, 1000)
-                        log_rollout(
-                            model, tokenizer, test_data, args, step, run, roll_key
-                        )
+                    roll_key = jax.random.fold_in(eval_key, 1000)
+                    log_rollout(
+                        model, tokenizer, test_data, args, step, run, roll_key
+                    )
 
             if step % args.save_every == 0:
                 checkpoint_file = output_path / f"checkpoint_{step}.eqx"
