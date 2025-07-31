@@ -23,16 +23,16 @@ class Args:
     output_dir: str = "data/checkpoints"
     checkpoint_path: Optional[str] = None
 
-    seq_len: int = 10
-    burn_in: int = 5
-    batch_size: int = 2
+    seq_len: int = 30
+    burn_in: int = 10
+    batch_size: int = 16
     patch_size: int = 7
 
     codebook_size: int = 512
     threshold: float = 0.75
 
-    embed_dim: int = 128
-    n_layers: int = 2
+    embed_dim: int = 512
+    n_layers: int = 4
     n_heads: int = 8
     ff_mult: float = 4.0
     dropout_embed: float = 0.1
@@ -53,6 +53,7 @@ class Args:
     wandb_project: Optional[str] = None
     wandb_name: Optional[str] = None
     seed: int = 0
+
 
 
 def print_system_info():

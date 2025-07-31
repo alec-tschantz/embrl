@@ -4,5 +4,8 @@
 
 ```sh
 pip install -r requirements.txt
-python main.py
+
+python generate_data.py
+python train_tokenizer.py
+python train_transformer.py
 ```
