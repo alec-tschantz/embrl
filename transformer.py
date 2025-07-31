@@ -97,7 +97,7 @@ class FeedForward(eqx.Module):
         y = jax.vmap(self.fc2)(y)
         if key is not None:
             y = self.drop(y, key=key)
-        return x + y
+        return y
 
 
 class Block(eqx.Module):
@@ -124,7 +124,7 @@ class Block(eqx.Module):
     def __call__(self, x: Float[Array, "S D"], mask: jnp.ndarray, *, key=None):
         k1, k2 = jax.random.split(key) if key is not None else (None, None)
         x = x + self.att(jax.vmap(self.n)(x), mask, key=k1)
-        return self.ff(x, key=k2)
+        return x + self.ff(x, key=k2)
 
 
 class Transformer(eqx.Module):
@@ -187,6 +187,7 @@ class Transformer(eqx.Module):
         if key is not None:
             key, ke = jax.random.split(key)
             x = self.drop_e(x, key=ke)
+       
         mask = _block_causal_mask(S, self.block_size)
         keys = (
             jax.random.split(key, len(self.blocks))
@@ -195,6 +196,7 @@ class Transformer(eqx.Module):
         )
         for blk, kb in zip(self.blocks, keys):
             x = blk(x, mask, key=kb)
+        
         x = jax.vmap(self.norm)(x)
         return jax.vmap(self.head)(x)
 

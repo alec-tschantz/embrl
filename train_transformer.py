@@ -24,7 +24,6 @@ class Args:
     checkpoint_path: Optional[str] = None
 
     seq_len: int = 20
-    burn_in: int = 5
     batch_size: int = 32
     patch_size: int = 7
 
@@ -48,6 +47,7 @@ class Args:
     eval_every: int = 500
     save_every: int = 5000
     rollout_len: int = 30
+    burn_in: int = 10
     gif_fps: int = 4
 
     wandb_project: Optional[str] = None
