@@ -5,3 +5,4 @@ optax
 equinox
 matplotlib
 craftax
+tyro

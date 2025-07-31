@@ -1,5 +1,7 @@
 .DS_Store
 wandb/
+data/
+checkpoints/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
