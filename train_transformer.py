@@ -47,7 +47,7 @@ class Args:
     eval_every: int = 500
     eval_batches: int = 10
     save_every: int = 5000
-    rollout_len: int = 40
+    rollout_len: int = 30
     gif_fps: int = 4
 
     wandb_project: Optional[str] = None
