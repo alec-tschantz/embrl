@@ -28,6 +28,9 @@ class Args:
     batch_size: int = 16
     patch_size: int = 7
 
+    codebook_size: int = 512
+    threshold: float = 0.75
+
     embed_dim: int = 512
     n_layers: int = 4
     n_heads: int = 8
@@ -253,8 +256,15 @@ def main(args: Args):
     print(f"  Number of actions: {n_actions}")
 
     print("\nLoading tokenizer...")
+    dim = args.patch_size * args.patch_size * 3
     tokenizer = eqx.tree_deserialise_leaves(
-        Path(args.tokenizer_path), Tokenizer(1, 1, 1, key=jax.random.PRNGKey(0))
+        Path(args.tokenizer_path),
+        Tokenizer(
+            dim,
+            thr=args.threshold,
+            max_codes=args.codebook_size,
+            key=jax.random.PRNGKey(0),
+        ),
     )
     active_codes = int(tokenizer.active.sum())
     print(f"  Active codes: {active_codes}/{tokenizer.max}")
