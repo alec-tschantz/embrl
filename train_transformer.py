@@ -23,15 +23,15 @@ class Args:
     output_dir: str = "data/checkpoints"
     checkpoint_path: Optional[str] = None
 
-    seq_len: int = 30
-    burn_in: int = 10
-    batch_size: int = 16
+    seq_len: int = 20
+    burn_in: int = 5
+    batch_size: int = 32
     patch_size: int = 7
 
     codebook_size: int = 512
     threshold: float = 0.75
 
-    embed_dim: int = 512
+    embed_dim: int = 256
     n_layers: int = 4
     n_heads: int = 8
     ff_mult: float = 4.0
@@ -44,8 +44,8 @@ class Args:
     grad_clip: float = 0.5
     n_updates: int = 50_000
 
-    eval_every: int = 500
     eval_batches: int = 10
+    eval_every: int = 500
     save_every: int = 5000
     rollout_len: int = 30
     gif_fps: int = 4
@@ -55,16 +55,11 @@ class Args:
     seed: int = 0
 
 
-
 def print_system_info():
     print("=" * 80)
-    print("System Information")
-    print("=" * 80)
-
     devices = jax.devices()
     print(f"JAX backend: {jax.default_backend()}")
     print(f"Number of devices: {len(devices)}")
-
     print("=" * 80)
 
 
@@ -105,23 +100,15 @@ def load_data(data_dir: Path):
     return (train_frames, train_actions), (test_frames, test_actions), metadata
 
 
-def sample_sequences(
-    frames: np.memmap, actions: np.memmap, batch_size: int, seq_len: int, key: jax.Array
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+def sample_sequences(frames, actions, batch_size, seq_len, key):
     n_frames = frames.shape[0]
-    starts = jax.random.randint(key, (batch_size,), 0, n_frames - seq_len + 1)
-
-    frame_batch = []
-    action_batch = []
-
-    for start in starts:
-        frame_seq = frames[start : start + seq_len]
-        action_seq = actions[start : start + seq_len]
-        frame_batch.append(frame_seq)
-        action_batch.append(action_seq)
-
-    # B, C, T, H, W 
-    frame_batch = jnp.array(frame_batch).swapaxes(1, 2) #
+    starts = np.asarray(
+        jax.random.randint(key, (batch_size,), 0, n_frames - seq_len + 1)
+    )
+    idx = starts[:, None] + np.arange(seq_len)[None, :]
+    frame_batch = np.stack(frames[idx], axis=0)
+    action_batch = np.stack(actions[idx], axis=0)
+    frame_batch = jnp.array(frame_batch).swapaxes(1, 2)
     return frame_batch, jnp.array(action_batch)
 
 
@@ -137,6 +124,9 @@ def loss_fn(
     return optax.softmax_cross_entropy_with_integer_labels(
         logits.reshape(-1, logits.shape[-1]), y.reshape(-1)
     ).mean()
+
+
+loss_fn_jit = eqx.filter_jit(loss_fn)
 
 
 @eqx.filter_jit
@@ -217,7 +207,7 @@ def evaluate(
         y = codes[:, 1:].reshape(batch_size, -1)
         acts = action_batch[:, :-1]
 
-        loss = loss_fn(model, x, y, acts, loss_key)
+        loss = loss_fn_jit(model, x, y, acts, loss_key)
         losses.append(loss)
 
     return jnp.mean(jnp.array(losses))
@@ -246,11 +236,6 @@ def main(args: Args):
     img_size = metadata["img_size"]
     n_actions = metadata["n_actions"]
 
-    print(f"  Train frames: {train_data[0].shape[0]:,}")
-    print(f"  Test frames: {test_data[0].shape[0]:,}")
-    print(f"  Image size: {img_size}x{img_size}")
-    print(f"  Number of actions: {n_actions}")
-
     print("\nLoading tokenizer...")
     dim = args.patch_size * args.patch_size * 3
     tokenizer = eqx.tree_deserialise_leaves(
@@ -263,16 +248,10 @@ def main(args: Args):
         ),
     )
     active_codes = int(tokenizer.active.sum())
-    print(f"  Active codes: {active_codes}/{tokenizer.max}")
+    print(f"Codes: {active_codes}/{tokenizer.max}")
 
+    print(f"\nLoading model...")
     block_size = (img_size // args.patch_size) ** 2
-    print(f"\nModel configuration:")
-    print(f"  Embed dim: {args.embed_dim}")
-    print(f"  Layers: {args.n_layers}")
-    print(f"  Heads: {args.n_heads}")
-    print(f"  Block size: {block_size}")
-    print(f"  Sequence length: {args.seq_len}")
-
     rng = jax.random.PRNGKey(args.seed)
     model_key, train_key = jax.random.split(rng)
 
@@ -292,7 +271,7 @@ def main(args: Args):
     )
 
     n_params = count_parameters(model)
-    print(f"\nModel parameters: {n_params:,} ({n_params / 1e6:.2f}M)")
+    print(f"Model parameters: {n_params:,} ({n_params / 1e6:.2f}M)")
 
     schedule = optax.cosine_decay_schedule(
         init_value=args.learning_rate, decay_steps=args.n_updates
@@ -312,24 +291,11 @@ def main(args: Args):
         print(f"  Resuming from step {start_step}")
 
     if args.wandb_project:
-        run = wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_name,
-            config={
-                "n_params": n_params,
-                "seq_len": args.seq_len,
-                "batch_size": args.batch_size,
-                "learning_rate": args.learning_rate,
-                "n_layers": args.n_layers,
-                "embed_dim": args.embed_dim,
-                "n_heads": args.n_heads,
-            },
-        )
+        run = wandb.init(project=args.wandb_project, name=args.wandb_name)
     else:
         run = None
 
     print(f"\nTraining for {args.n_updates} steps...")
-
     with tqdm(total=args.n_updates - start_step, initial=start_step) as pbar:
         for step in range(start_step, args.n_updates):
             train_key, sample_key, step_key = jax.random.split(train_key, 3)
@@ -349,13 +315,11 @@ def main(args: Args):
             pbar.update(1)
             pbar.set_postfix(loss=f"{loss:.4f}")
 
-            if run and step % 10 == 0:
-                weight_norm = optax.global_norm(eqx.filter(model, eqx.is_array))
+            if run and step % 50 == 0:
                 run.log(
                     {
                         "train_loss": float(loss),
                         "grad_norm": float(grad_norm),
-                        "weight_norm": float(weight_norm),
                         "learning_rate": schedule(step),
                     },
                     step=step,
@@ -375,14 +339,17 @@ def main(args: Args):
                 )
 
                 print(f"\n[Step {step}] Test loss: {test_loss:.4f}")
-
                 if run:
-                    run.log({"test_loss": float(test_loss)}, step=step)
-
-                    roll_key = jax.random.fold_in(eval_key, 1000)
-                    log_rollout(
-                        model, tokenizer, test_data, args, step, run, roll_key
+                    weight_norm = optax.global_norm(eqx.filter(model, eqx.is_array))
+                    run.log(
+                        {
+                            "test_loss": float(test_loss),
+                            "weight_norm": float(weight_norm),
+                        },
+                        step=step,
                     )
+                    roll_key = jax.random.fold_in(eval_key, 1000)
+                    log_rollout(model, tokenizer, test_data, args, step, run, roll_key)
 
             if step % args.save_every == 0:
                 checkpoint_file = output_path / f"checkpoint_{step}.eqx"

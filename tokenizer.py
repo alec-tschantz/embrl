@@ -45,6 +45,7 @@ class Tokenizer(eqx.Module):
         d = x2 + c2 - 2 * jnp.einsum("...d,nd->...n", x, self.codes)
         return jnp.where(self.active, d, jnp.inf)
 
+    @eqx.filter_jit
     def __call__(
         self, imgs: Float[Array, "B C T H W"], patch_size: int
     ) -> Int32[Array, "B T Hp Wp"]:
