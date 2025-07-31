@@ -23,16 +23,16 @@ class Args:
     output_dir: str = "data/checkpoints"
     checkpoint_path: Optional[str] = None
 
-    seq_len: int = 30
-    burn_in: int = 10
-    batch_size: int = 16
+    seq_len: int = 10
+    burn_in: int = 5
+    batch_size: int = 2
     patch_size: int = 7
 
     codebook_size: int = 512
     threshold: float = 0.75
 
-    embed_dim: int = 512
-    n_layers: int = 4
+    embed_dim: int = 128
+    n_layers: int = 2
     n_heads: int = 8
     ff_mult: float = 4.0
     dropout_embed: float = 0.1
@@ -63,13 +63,6 @@ def print_system_info():
     devices = jax.devices()
     print(f"JAX backend: {jax.default_backend()}")
     print(f"Number of devices: {len(devices)}")
-
-    for i, device in enumerate(devices):
-        print(f"\nDevice {i}: {device}")
-        if hasattr(device, "memory_stats"):
-            stats = device.memory_stats()
-            print(f"  Memory: {stats['bytes_in_use'] / 1e9:.2f} GB used")
-            print(f"  Peak: {stats.get('peak_bytes_in_use', 0) / 1e9:.2f} GB")
 
     print("=" * 80)
 
@@ -126,7 +119,9 @@ def sample_sequences(
         frame_batch.append(frame_seq)
         action_batch.append(action_seq)
 
-    return jnp.array(frame_batch), jnp.array(action_batch)
+    # B, C, T, H, W 
+    frame_batch = jnp.array(frame_batch).swapaxes(1, 2) #
+    return frame_batch, jnp.array(action_batch)
 
 
 def loss_fn(
@@ -341,7 +336,6 @@ def main(args: Args):
             frame_batch, action_batch = sample_sequences(
                 train_data[0], train_data[1], args.batch_size, args.seq_len, sample_key
             )
-
             codes = tokenizer(frame_batch, args.patch_size)
             x = codes[:, :-1].reshape(args.batch_size, -1)
             y = codes[:, 1:].reshape(args.batch_size, -1)
